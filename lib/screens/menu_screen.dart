@@ -1,16 +1,17 @@
 import 'package:flutter/material.dart';
+
 import 'package:venidng_coffee/data/coffee_catalog.dart';
 import 'package:venidng_coffee/models/order_line.dart';
 import 'package:venidng_coffee/theme/app_theme.dart';
 import 'package:venidng_coffee/utils/ble_manager.dart';
-import 'package:venidng_coffee/widgets/coffee_card.dart';
 
+import 'package:venidng_coffee/widgets/coffee_card.dart';
 import 'package:venidng_coffee/widgets/menu_ambient.dart';
 import 'package:venidng_coffee/widgets/order_confirm_dialog.dart';
 import 'package:venidng_coffee/widgets/payment_bar.dart';
-import 'package:venidng_coffee/widgets/brewing/brewing_process_overlay.dart';
 import 'package:venidng_coffee/widgets/success_dialog.dart';
 import 'package:venidng_coffee/widgets/vending_background.dart';
+import 'package:venidng_coffee/order_status_dialog.dart';
 
 class MenuScreen extends StatefulWidget {
   const MenuScreen({super.key});
@@ -19,60 +20,104 @@ class MenuScreen extends StatefulWidget {
   State<MenuScreen> createState() => _MenuScreenState();
 }
 
-class _MenuScreenState extends State<MenuScreen> with TickerProviderStateMixin {
+class _MenuScreenState extends State<MenuScreen>
+    with TickerProviderStateMixin {
   final Map<String, int> _quantities = {};
+
   bool _isPaying = false;
 
-  late final AnimationController _hintPulse;
-  late final AnimationController _titleFloat;
+  late AnimationController _titleController;
+  late AnimationController _hintController;
 
-  int get _totalItems => _quantities.values.fold(0, (sum, q) => sum + q);
-
-  int get _totalPrice {
-    var total = 0;
-    for (final product in coffeeCatalog) {
-      total += product.price * (_quantities[product.id] ?? 0);
-    }
-    return total;
-  }
+  late Animation<double> _titleFloat;
+  late Animation<double> _hintPulse;
 
   @override
   void initState() {
     super.initState();
-    _hintPulse = AnimationController(
+
+    _titleController = AnimationController(
       vsync: this,
-      duration: const Duration(milliseconds: 1400),
+      duration: const Duration(seconds: 3),
     )..repeat(reverse: true);
-    _titleFloat = AnimationController(
+
+    _hintController = AnimationController(
       vsync: this,
-      duration: const Duration(milliseconds: 2500),
+      duration: const Duration(milliseconds: 1200),
     )..repeat(reverse: true);
+
+    _titleFloat = Tween<double>(
+      begin: 0,
+      end: 1,
+    ).animate(
+      CurvedAnimation(
+        parent: _titleController,
+        curve: Curves.easeInOut,
+      ),
+    );
+
+    _hintPulse = Tween<double>(
+      begin: 0,
+      end: 1,
+    ).animate(
+      CurvedAnimation(
+        parent: _hintController,
+        curve: Curves.easeInOut,
+      ),
+    );
   }
 
   @override
   void dispose() {
-    _hintPulse.dispose();
-    _titleFloat.dispose();
+    _titleController.dispose();
+    _hintController.dispose();
     super.dispose();
+  }
+
+  int get _totalItems {
+    int total = 0;
+
+    for (final qty in _quantities.values) {
+      total += qty;
+    }
+
+    return total;
+  }
+
+  int get _totalPrice {
+    int total = 0;
+
+    for (final product in coffeeCatalog) {
+      final qty = _quantities[product.id] ?? 0;
+      total += qty * product.price;
+    }
+
+    return total;
   }
 
   void _changeQty(String id, int delta) {
     setState(() {
-      final current = _quantities[id] ?? 0;
-      final next = (current + delta).clamp(0, 99);
+      // اگر کاربر داره یک محصول دیگه رو اضافه می‌کنه، قبلی حذف بشه
+      _quantities.clear();
+
+      final next = (delta > 0) ? 1 : 0;
+
       if (next == 0) {
         _quantities.remove(id);
       } else {
-        _quantities[id] = next;
+        _quantities[id] = 1; // فقط 1 عدد مجاز
       }
     });
   }
 
   List<OrderLine> _buildOrderLines() {
     final lines = <OrderLine>[];
+
     for (final product in coffeeCatalog) {
       final qty = _quantities[product.id] ?? 0;
+
       if (qty == 0) continue;
+
       lines.add(
         OrderLine(
           name: product.name,
@@ -84,42 +129,91 @@ class _MenuScreenState extends State<MenuScreen> with TickerProviderStateMixin {
         ),
       );
     }
+
     return lines;
   }
+
+  void _showLoadingDialog() {
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => const Center(
+        child: CircularProgressIndicator(
+          color: Colors.white,
+        ),
+      ),
+    );
+  }
+
+
+
+  void _showOrderDialog() {
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) {
+        return const OrderStatusDialog();
+      },
+    );
+  }
+
+
 
   Future<void> _onPay() async {
     if (_totalItems == 0 || _isPaying) return;
 
-    final confirmed = await showOrderConfirmDialog(
+    final lines = _buildOrderLines();
+
+    // دیالوگ حالا دو مقدار رو برمی‌گردونه: تایید شدن و خواستن لیوان
+    final result = await showOrderConfirmDialog(
       context,
-      items: _buildOrderLines(),
+      items: lines,
       totalItems: _totalItems,
       totalPrice: _totalPrice,
     );
-    if (!confirmed || !mounted) return;
+
+    // اگر تایید نکرده بود، کلا خارج شو
+    if (!result.confirmed) {
+      return;
+    }
 
     setState(() => _isPaying = true);
 
-    await showBrewingProcessOverlay(context);
+    OrderStatusDialog.update(OrderStep.preparing);
+    _showOrderDialog();
 
-    if (!mounted) return;
+    try {
+      for (final entry in _quantities.entries) {
+        // ارسال دیتا به همراه متغیر لیوان (result.wantsCup)
+        final success = await BleManager().sendOrder(
+          entry.key,
+          entry.value,
+          result.wantsCup, // <--- این بخش اضافه شد
+        );
 
-    // ارسال دیتا به ESP32 بعد از پرداخت موفق
-    for (var entry in _quantities.entries) {
-      if (entry.value > 0) {
-        await BleManager().sendOrder(entry.key, entry.value);
-        // یه تاخیر کوتاه بین ارسال‌ها اگر چندتا محصول بود
-        await Future.delayed(const Duration(milliseconds: 500));
+        if (!success) throw Exception();
+        await Future.delayed(const Duration(milliseconds: 200));
       }
+
+      final response = await BleManager().waitForResponse();
+
+      debugPrint("FINAL RESPONSE = $response");
+
+      if (response.trim() == "1") {
+        OrderStatusDialog.update(OrderStep.success);
+        setState(() => _quantities.clear());
+      } else {
+        OrderStatusDialog.update(OrderStep.failed);
+      }
+    } catch (e) {
+      OrderStatusDialog.update(OrderStep.failed);
     }
 
-    setState(() {
+    setState(() => _isPaying = false);
 
-      _isPaying = false;
-      _quantities.clear();
-    });
+    await Future.delayed(const Duration(seconds: 2));
 
-    await showPaymentSuccessDialog(context);
+    if (mounted) Navigator.of(context).pop();
   }
 
   @override
@@ -136,18 +230,25 @@ class _MenuScreenState extends State<MenuScreen> with TickerProviderStateMixin {
                     totalItems: _totalItems,
                     floatAnimation: _titleFloat,
                   ),
+
                   _SectionTitle(
                     totalItems: _totalItems,
                     hintPulse: _hintPulse,
                   ),
+
                   Expanded(
                     child: Padding(
-                      padding: const EdgeInsets.fromLTRB(16, 0, 16, 0),
+                      padding: const EdgeInsets.fromLTRB(
+                        16,
+                        0,
+                        16,
+                        0,
+                      ),
                       child: GridView.builder(
                         physics: const BouncingScrollPhysics(),
                         padding: const EdgeInsets.only(bottom: 8),
                         gridDelegate:
-                            const SliverGridDelegateWithFixedCrossAxisCount(
+                        const SliverGridDelegateWithFixedCrossAxisCount(
                           crossAxisCount: 2,
                           mainAxisSpacing: 12,
                           crossAxisSpacing: 12,
@@ -156,18 +257,26 @@ class _MenuScreenState extends State<MenuScreen> with TickerProviderStateMixin {
                         itemCount: coffeeCatalog.length,
                         itemBuilder: (context, index) {
                           final product = coffeeCatalog[index];
-                          final qty = _quantities[product.id] ?? 0;
+
+                          final qty =
+                              _quantities[product.id] ?? 0;
+
                           return CoffeeCard(
                             product: product,
                             quantity: qty,
                             index: index,
-                            onIncrement: () => _changeQty(product.id, 1),
-                            onDecrement: () => _changeQty(product.id, -1),
+                            onIncrement: () {
+                              _changeQty(product.id, 1);
+                            },
+                            onDecrement: () {
+                              _changeQty(product.id, -1);
+                            },
                           );
                         },
                       ),
                     ),
                   ),
+
                   PaymentBar(
                     totalItems: _totalItems,
                     totalPrice: _totalPrice,
@@ -199,118 +308,38 @@ class _SectionTitle extends StatelessWidget {
       padding: const EdgeInsets.fromLTRB(20, 0, 20, 10),
       child: Row(
         children: [
-          _WiggleCoffeeIcon(animation: hintPulse),
-          const SizedBox(width: 8),
-          GradientText(
-            'منوی نوشیدنی',
-            style: Theme.of(context).textTheme.titleMedium!.copyWith(
-                  fontWeight: FontWeight.w800,
-                ),
+          const Icon(
+            Icons.local_cafe_rounded,
+            color: AppColors.accent,
           ),
-          const Spacer(),
-          if (totalItems == 0)
-            FadeTransition(
-              opacity: Tween<double>(begin: 0.45, end: 1).animate(hintPulse),
-              child: Container(
-                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
-                decoration: BoxDecoration(
-                  borderRadius: BorderRadius.circular(14),
-                  border: Border.all(
-                    color: AppColors.accent.withValues(alpha: 0.25),
-                  ),
-                  color: AppColors.accent.withValues(alpha: 0.08),
-                ),
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Icon(
-                      Icons.touch_app_rounded,
-                      size: 14,
-                      color: AppColors.accent.withValues(
-                        alpha: 0.7 + hintPulse.value * 0.3,
-                      ),
-                    ),
-                    const SizedBox(width: 4),
-                    Text(
-                      'روی کارت بزنید',
-                      style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                            fontSize: 11,
-                            color: AppColors.accentBright,
-                          ),
-                    ),
-                  ],
-                ),
-              ),
-            )
-          else
-            TweenAnimationBuilder<int>(
-              tween: IntTween(end: totalItems),
-              duration: const Duration(milliseconds: 400),
-              curve: Curves.elasticOut,
-              builder: (context, value, _) {
-                return Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Icon(
-                      Icons.check_circle_outline_rounded,
-                      size: 16,
-                      color: AppColors.success.withValues(alpha: 0.9),
-                    ),
-                    const SizedBox(width: 4),
-                    Text(
-                      '$value انتخاب',
-                      style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                            color: AppColors.success,
-                            fontWeight: FontWeight.w600,
-                            fontSize: 11,
-                          ),
-                    ),
-                  ],
-                );
-              },
+
+          const SizedBox(width: 8),
+
+          Text(
+            'منوی نوشیدنی',
+            style: Theme.of(context)
+                .textTheme
+                .titleMedium
+                ?.copyWith(
+              fontWeight: FontWeight.w700,
             ),
+          ),
+
+          const Spacer(),
+
+          Text(
+            '$totalItems انتخاب',
+            style: const TextStyle(
+              color: AppColors.success,
+            ),
+          ),
         ],
       ),
     );
   }
 }
 
-class _WiggleCoffeeIcon extends StatelessWidget {
-  const _WiggleCoffeeIcon({required this.animation});
-
-  final Animation<double> animation;
-
-  @override
-  Widget build(BuildContext context) {
-    return AnimatedBuilder(
-      animation: animation,
-      builder: (context, child) {
-        return Transform.rotate(
-          angle: (animation.value - 0.5) * 0.15,
-          child: Transform.scale(
-            scale: 1 + (animation.value - 0.5) * 0.08,
-            child: child,
-          ),
-        );
-      },
-      child: Container(
-        padding: const EdgeInsets.all(6),
-        decoration: BoxDecoration(
-          shape: BoxShape.circle,
-          color: AppColors.accent.withValues(alpha: 0.12),
-          border: Border.all(color: AppColors.accent.withValues(alpha: 0.25)),
-        ),
-        child: const Icon(
-          Icons.local_cafe_rounded,
-          size: 16,
-          color: AppColors.accent,
-        ),
-      ),
-    );
-  }
-}
-
-class _MenuHeader extends StatefulWidget {
+class _MenuHeader extends StatelessWidget {
   const _MenuHeader({
     required this.totalItems,
     required this.floatAnimation,
@@ -320,186 +349,46 @@ class _MenuHeader extends StatefulWidget {
   final Animation<double> floatAnimation;
 
   @override
-  State<_MenuHeader> createState() => _MenuHeaderState();
-}
-
-class _MenuHeaderState extends State<_MenuHeader> {
-  @override
   Widget build(BuildContext context) {
-    final float = (widget.floatAnimation.value - 0.5) * 6;
-
     return Padding(
-      padding: const EdgeInsets.fromLTRB(16, 8, 16, 4),
-      child: AnimatedBuilder(
-        animation: widget.floatAnimation,
-        builder: (context, child) {
-          return Transform.translate(
-            offset: Offset(0, float),
-            child: child,
-          );
-        },
-        child: Container(
-          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
-          decoration: BoxDecoration(
-            borderRadius: BorderRadius.circular(24),
-            gradient: LinearGradient(
-              colors: [
-                Colors.white.withValues(alpha: 0.12),
-                Colors.white.withValues(alpha: 0.03),
-              ],
+      padding: const EdgeInsets.all(16),
+      child: Container(
+        padding: const EdgeInsets.all(16),
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(24),
+          color: Colors.white.withValues(alpha: 0.08),
+        ),
+        child: Row(
+          children: [
+            const Icon(
+              Icons.coffee,
+              color: AppColors.accent,
+              size: 32,
             ),
-            border: Border.all(color: Colors.white.withValues(alpha: 0.1)),
-            boxShadow: [
-              BoxShadow(
-                color: AppColors.accent.withValues(alpha: 0.08),
-                blurRadius: 20,
-                offset: const Offset(0, 6),
+
+            const SizedBox(width: 12),
+
+            Expanded(
+              child: Text(
+                'ماشین قهوه',
+                style: Theme.of(context)
+                    .textTheme
+                    .titleLarge,
               ),
-            ],
-          ),
-          child: Row(
-            children: [
-              _FloatingLogo(animation: widget.floatAnimation),
-              const SizedBox(width: 14),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    GradientText(
-                      'ماشین قهوه',
-                      style: Theme.of(context).textTheme.titleLarge!.copyWith(
-                            fontSize: 22,
-                            fontWeight: FontWeight.w800,
-                          ),
-                    ),
-                    const SizedBox(height: 3),
-                    Text(
-                      'لحظه‌ای تا یک فنجان عالی',
-                      style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                            fontSize: 12,
-                          ),
-                    ),
-                  ],
+            ),
+
+            CircleAvatar(
+              backgroundColor: AppColors.accent,
+              child: Text(
+                '$totalItems',
+                style: const TextStyle(
+                  color: Colors.black,
                 ),
               ),
-              _CartBadgeAnimated(count: widget.totalItems),
-            ],
-          ),
+            ),
+          ],
         ),
       ),
-    );
-  }
-}
-
-class _FloatingLogo extends StatelessWidget {
-  const _FloatingLogo({required this.animation});
-
-  final Animation<double> animation;
-
-  @override
-  Widget build(BuildContext context) {
-    return AnimatedBuilder(
-      animation: animation,
-      builder: (context, child) {
-        return Transform.translate(
-          offset: Offset(0, (animation.value - 0.5) * -4),
-          child: Transform.rotate(
-            angle: (animation.value - 0.5) * 0.04,
-            child: child,
-          ),
-        );
-      },
-      child: const _HeaderLogo(),
-    );
-  }
-}
-
-class _HeaderLogo extends StatelessWidget {
-  const _HeaderLogo();
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      width: 54,
-      height: 54,
-      decoration: BoxDecoration(
-        shape: BoxShape.circle,
-        gradient: const LinearGradient(
-          colors: [Color(0xFF4A3528), Color(0xFF1A1008)],
-        ),
-        border: Border.all(color: AppColors.accent.withValues(alpha: 0.45)),
-        boxShadow: [
-          BoxShadow(
-            color: AppColors.accent.withValues(alpha: 0.25),
-            blurRadius: 14,
-          ),
-        ],
-      ),
-      child: const Icon(
-        Icons.coffee_rounded,
-        color: AppColors.accentBright,
-        size: 28,
-      ),
-    );
-  }
-}
-
-class _CartBadgeAnimated extends StatelessWidget {
-  const _CartBadgeAnimated({required this.count});
-
-  final int count;
-
-  @override
-  Widget build(BuildContext context) {
-    return AnimatedSwitcher(
-      duration: const Duration(milliseconds: 400),
-      switchInCurve: Curves.elasticOut,
-      switchOutCurve: Curves.easeIn,
-      transitionBuilder: (child, anim) {
-        return ScaleTransition(
-          scale: anim,
-          child: RotationTransition(
-            turns: Tween<double>(begin: 0.2, end: 0).animate(anim),
-            child: child,
-          ),
-        );
-      },
-      child: count > 0
-          ? Container(
-              key: ValueKey(count),
-              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
-              decoration: BoxDecoration(
-                gradient: AppGradients.accent,
-                borderRadius: BorderRadius.circular(16),
-                boxShadow: [
-                  BoxShadow(
-                    color: AppColors.accent.withValues(alpha: 0.45),
-                    blurRadius: 12,
-                    offset: const Offset(0, 4),
-                  ),
-                ],
-              ),
-              child: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  const Icon(
-                    Icons.shopping_cart_rounded,
-                    size: 16,
-                    color: AppColors.background,
-                  ),
-                  const SizedBox(width: 6),
-                  Text(
-                    '$count',
-                    style: const TextStyle(
-                      color: AppColors.background,
-                      fontWeight: FontWeight.w800,
-                      fontSize: 15,
-                    ),
-                  ),
-                ],
-              ),
-            )
-          : const SizedBox(key: ValueKey('empty'), width: 8),
     );
   }
 }

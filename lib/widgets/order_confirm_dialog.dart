@@ -5,13 +5,14 @@ import 'package:venidng_coffee/theme/app_decorations.dart';
 import 'package:venidng_coffee/theme/app_theme.dart';
 import 'package:venidng_coffee/utils/price_format.dart';
 
-Future<bool> showOrderConfirmDialog(
-  BuildContext context, {
-  required List<OrderLine> items,
-  required int totalItems,
-  required int totalPrice,
-}) {
-  return showGeneralDialog<bool>(
+// نوع بازگشتی به یک رکورد (Record) تبدیل شد تا دو مقدار را همزمان برگرداند
+Future<({bool confirmed, bool wantsCup})> showOrderConfirmDialog(
+    BuildContext context, {
+      required List<OrderLine> items,
+      required int totalItems,
+      required int totalPrice,
+    }) {
+  return showGeneralDialog<({bool confirmed, bool wantsCup})>(
     context: context,
     barrierDismissible: true,
     barrierLabel: 'بستن',
@@ -33,10 +34,10 @@ Future<bool> showOrderConfirmDialog(
         ),
       );
     },
-  ).then((value) => value ?? false);
+  ).then((value) => value ?? (confirmed: false, wantsCup: false));
 }
 
-class _OrderConfirmBody extends StatelessWidget {
+class _OrderConfirmBody extends StatefulWidget {
   const _OrderConfirmBody({
     required this.items,
     required this.totalItems,
@@ -48,7 +49,19 @@ class _OrderConfirmBody extends StatelessWidget {
   final int totalPrice;
 
   @override
+  State<_OrderConfirmBody> createState() => _OrderConfirmBodyState();
+}
+
+class _OrderConfirmBodyState extends State<_OrderConfirmBody> {
+  // به صورت پیش‌فرض لیوان انتخاب شده است (تا کاربر افزایش قیمت را ببیند)
+  bool _wantsCup = true;
+  final int _cupPrice = 10000;
+
+  @override
   Widget build(BuildContext context) {
+    // محاسبه قیمت نهایی با یا بدون لیوان
+    final finalPrice = widget.totalPrice + (_wantsCup ? _cupPrice : 0);
+
     return Center(
       child: Padding(
         padding: const EdgeInsets.symmetric(horizontal: 22),
@@ -83,12 +96,12 @@ class _OrderConfirmBody extends StatelessWidget {
                   Column(
                     mainAxisSize: MainAxisSize.min,
                     children: [
-                      _DialogHeader(totalItems: totalItems),
+                      _DialogHeader(totalItems: widget.totalItems),
                       Flexible(
                         child: ListView.separated(
                           shrinkWrap: true,
                           padding: const EdgeInsets.fromLTRB(20, 0, 20, 8),
-                          itemCount: items.length,
+                          itemCount: widget.items.length,
                           separatorBuilder: (_, __) => Padding(
                             padding: const EdgeInsets.symmetric(vertical: 2),
                             child: Divider(
@@ -97,17 +110,30 @@ class _OrderConfirmBody extends StatelessWidget {
                             ),
                           ),
                           itemBuilder: (context, index) => _OrderLineRow(
-                            line: items[index],
+                            line: widget.items[index],
                             index: index + 1,
                           ),
                         ),
                       ),
-                      _TotalSection(totalPrice: totalPrice),
+
+                      // بخش انتخاب لیوان
+                      _CupSelectionToggle(
+                        wantsCup: _wantsCup,
+                        cupPrice: _cupPrice,
+                        onChanged: (val) {
+                          HapticFeedback.lightImpact();
+                          setState(() => _wantsCup = val);
+                        },
+                      ),
+
+                      // نمایش قیمت نهایی که آپدیت می‌شود
+                      _TotalSection(totalPrice: finalPrice),
+
                       _ActionButtons(
-                        onCancel: () => Navigator.of(context).pop(false),
+                        onCancel: () => Navigator.of(context).pop((confirmed: false, wantsCup: _wantsCup)),
                         onConfirm: () {
                           HapticFeedback.mediumImpact();
-                          Navigator.of(context).pop(true);
+                          Navigator.of(context).pop((confirmed: true, wantsCup: _wantsCup));
                         },
                       ),
                     ],
@@ -117,6 +143,82 @@ class _OrderConfirmBody extends StatelessWidget {
             ),
           ),
         ),
+      ),
+    );
+  }
+}
+
+// ویجت جدید برای سوییچ لیوان
+class _CupSelectionToggle extends StatelessWidget {
+  const _CupSelectionToggle({
+    required this.wantsCup,
+    required this.cupPrice,
+    required this.onChanged,
+  });
+
+  final bool wantsCup;
+  final int cupPrice;
+  final ValueChanged<bool> onChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      margin: const EdgeInsets.symmetric(horizontal: 20, vertical: 4),
+      padding: const EdgeInsets.fromLTRB(16, 12, 12, 12),
+      decoration: BoxDecoration(
+        color: Colors.white.withValues(alpha: 0.04),
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(
+          color: wantsCup ? AppColors.accent.withValues(alpha: 0.5) : Colors.white.withValues(alpha: 0.06),
+          width: wantsCup ? 1.5 : 1,
+        ),
+      ),
+      child: Row(
+        children: [
+          Container(
+            padding: const EdgeInsets.all(8),
+            decoration: BoxDecoration(
+              color: wantsCup ? AppColors.accent.withValues(alpha: 0.15) : Colors.white.withValues(alpha: 0.05),
+              shape: BoxShape.circle,
+            ),
+            child: Icon(
+              Icons.local_cafe_outlined, // آیکون لیوان
+              color: wantsCup ? AppColors.accentBright : AppColors.textMuted,
+              size: 24,
+            ),
+          ),
+          const SizedBox(width: 14),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'لیوان کاغذی',
+                  style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                    fontWeight: FontWeight.w700,
+                    color: wantsCup ? Colors.white : AppColors.textMuted,
+                  ),
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  '+ ${formatToman(cupPrice)} تومان',
+                  style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                    fontSize: 11,
+                    color: wantsCup ? AppColors.accentBright : AppColors.textMuted,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          Switch(
+            value: wantsCup,
+            onChanged: onChanged,
+            activeColor: AppColors.background,
+            activeTrackColor: AppColors.accent,
+            inactiveThumbColor: AppColors.textMuted,
+            inactiveTrackColor: Colors.white.withValues(alpha: 0.1),
+          ),
+        ],
       ),
     );
   }
@@ -162,16 +264,16 @@ class _DialogHeader extends StatelessWidget {
           GradientText(
             'تأیید سفارش',
             style: Theme.of(context).textTheme.titleLarge!.copyWith(
-                  fontSize: 24,
-                  fontWeight: FontWeight.w800,
-                ),
+              fontSize: 24,
+              fontWeight: FontWeight.w800,
+            ),
           ),
           const SizedBox(height: 8),
           Text(
             'یک نگاه آخر به سفارشت بینداز',
             style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                  fontSize: 13,
-                ),
+              fontSize: 13,
+            ),
           ),
           const SizedBox(height: 14),
           Container(
@@ -256,15 +358,15 @@ class _OrderLineRow extends StatelessWidget {
                 Text(
                   line.name,
                   style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                        fontWeight: FontWeight.w700,
-                      ),
+                    fontWeight: FontWeight.w700,
+                  ),
                 ),
                 const SizedBox(height: 2),
                 Text(
                   '${line.quantity} × ${formatToman(line.unitPrice)} تومان',
                   style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                        fontSize: 11,
-                      ),
+                    fontSize: 11,
+                  ),
                 ),
               ],
             ),
@@ -275,15 +377,15 @@ class _OrderLineRow extends StatelessWidget {
               Text(
                 formatToman(line.lineTotal),
                 style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                      color: AppColors.accentBright,
-                      fontWeight: FontWeight.w800,
-                    ),
+                  color: AppColors.accentBright,
+                  fontWeight: FontWeight.w800,
+                ),
               ),
               Text(
                 'تومان',
                 style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                      fontSize: 10,
-                    ),
+                  fontSize: 10,
+                ),
               ),
             ],
           ),
@@ -320,16 +422,16 @@ class _TotalSection extends StatelessWidget {
           Text(
             'جمع کل',
             style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                  fontWeight: FontWeight.w700,
-                ),
+              fontWeight: FontWeight.w700,
+            ),
           ),
           const Spacer(),
           GradientText(
             formatToman(totalPrice),
             style: Theme.of(context).textTheme.titleLarge!.copyWith(
-                  fontSize: 24,
-                  fontWeight: FontWeight.w800,
-                ),
+              fontSize: 24,
+              fontWeight: FontWeight.w800,
+            ),
           ),
           const SizedBox(width: 4),
           Text('تومان', style: Theme.of(context).textTheme.bodyMedium),
